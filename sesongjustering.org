@@ -1,0 +1,83 @@
+#+STARTUP: fold
+#+STARTUP: indent
+#+TITLE: Sesongjustering av besøkstall
+#+EXPORT_FILE_NAME: readme.org
+#+PROPERTY: header-args:python :session *Python* :tangle kode.py :comments both :eval never-export :exports both
+#+PROPERTY: header-args:bash :results silent
+* Oppsett av Pythonmiljø
+Jeg bruker et Docker-bilde.
+#+begin_src dockerfile :tangle .devcontainer/Dockerfile
+FROM python:3.10-bookworm
+
+WORKDIR /kode
+
+ENV PYTHONPAKKER="\
+numpy \
+matplotlib \
+scipy \
+statsmodels \
+pandas \
+pandas_gbq \
+pyright \
+"
+
+RUN python -m ensurepip --upgrade \
+    && python -m pip install --upgrade --no-cache-dir $PYTHONPAKKER
+#+end_src
+
+Dette er devcontainer.json-filen som konfigurerer byggingen av bildet og kjøringen av beholderen. Jeg setter merkelappen python_dv (python datavitenskap) på bildet, og gir det navnet sesongjustering når beholderen fyres opp.
+#+begin_src js :tangle .devcontainer/devcontainer.json
+  {
+      "name": "Python_datavitenskap",
+      "build": {"dockerfile": "Dockerfile",
+    	      "options": ["-t", "python_dv"]},
+      "mounts": [{"source": "/tmp", "target": "/tmp", "type": "bind"}],
+      "runArga": ["-it", "--rm", "--name", "sesongjustering"]
+  }
+#+end_src
+* Oppstart av devcontainer
+Nå starter jeg opp beholderen.
+#+begin_src bash
+  devcontainer up --workspace-folder .
+#+end_src
+
+Dette skriptet gjør at jeg kan kjøre Python REPL-en i beholderen.
+#+begin_src bash :tangle docker-python-shell.sh
+  #!/bin/bash
+  devcontainer exec --workspace-folder . python
+#+end_src
+
+#+begin_src bash
+  chmod u+x docker-python-shell.sh
+#+end_src
+
+#+begin_src emacs-lisp
+  (setq python-shell-interpreter "~/Dokumenter/NRK TV/Sesjongjustering/docker-python-shell.sh"
+        python-shell-interpreter-args "-i --simple-prompt"
+        python-shell-completion-native-enable nil)
+#+end_src
+* Kode
+** Pythonbiblioteker
+#+begin_src python
+  import matplotlib.pyplot as plt
+  import pandas as pd
+  import pandas_gbq
+#+end_src
+** Spørringer
+#+name: spørring
+#+begin_src bigquery
+   SELECT partitionDate dato, HLL_COUNT.MERGE(visitorsSketch) klienter
+     FROM `nrk-datahub.snowplow_aggregate.service_daily_v01`
+    WHERE nrkService = 'nrktv'
+      AND partitionDate < CURRENT_DATE
+    GROUP BY 1
+    ORDER BY 1
+#+end_src
+** Innlesning av data
+#+begin_src python :results silent :noweb yes
+  spørring = """
+  <<spørring>>
+  """
+  df = pandas_gbq.read_gbq(spørring, dialect="standard")
+#+end_src
+
