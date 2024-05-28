@@ -19,6 +19,9 @@ statsmodels \
 pandas \
 pandas_gbq \
 pyright \
+# pandas_gbq vil ha denne \
+tqdm \
+scikit-learn \
 "
 
 RUN python -m ensurepip --upgrade \
@@ -28,19 +31,15 @@ RUN python -m ensurepip --upgrade \
 Dette er devcontainer.json-filen som konfigurerer byggingen av bildet og kjøringen av beholderen. Jeg setter merkelappen python_dv (python datavitenskap) på bildet, og gir det navnet sesongjustering når beholderen fyres opp.
 #+begin_src js :tangle .devcontainer/devcontainer.json
   {
-      "name": "Python_datavitenskap",
+      "name": "Python datavitenskap",
       "build": {"dockerfile": "Dockerfile",
     	      "options": ["-t", "python_dv"]},
-      "mounts": [{"source": "/tmp", "target": "/tmp", "type": "bind"}],
-      "runArga": ["-it", "--rm", "--name", "sesongjustering"]
+      "mounts": [{"source": "/tmp", "target": "/tmp", "type": "bind"},
+  	       {"source": "/home/n645982/.config/gcloud", "target": "/root/.config/gcloud", "type": "bind"}],
+      "runArgs": ["-it", "--rm", "--name=sesongjustering"]
   }
 #+end_src
-* Oppstart av devcontainer
-Nå starter jeg opp beholderen.
-#+begin_src bash
-  devcontainer up --workspace-folder .
-#+end_src
-
+* Konfigurering av Python shell i Emacs
 Dette skriptet gjør at jeg kan kjøre Python REPL-en i beholderen.
 #+begin_src bash :tangle docker-python-shell.sh
   #!/bin/bash
@@ -56,12 +55,19 @@ Dette skriptet gjør at jeg kan kjøre Python REPL-en i beholderen.
         python-shell-interpreter-args "-i --simple-prompt"
         python-shell-completion-native-enable nil)
 #+end_src
-* Kode
+* Oppstart av devcontainer
+Nå starter jeg opp beholderen.
+#+begin_src bash
+  devcontainer up --workspace-folder .
+#+end_src
+* Innledende undersøkelse
 ** Pythonbiblioteker
-#+begin_src python
+#+begin_src python :results silent
   import matplotlib.pyplot as plt
   import pandas as pd
   import pandas_gbq
+  from numpy import sqrt, pi, log
+  from scipy.optimize import curve_fit
 #+end_src
 ** Spørringer
 #+name: spørring
@@ -78,6 +84,132 @@ Dette skriptet gjør at jeg kan kjøre Python REPL-en i beholderen.
   spørring = """
   <<spørring>>
   """
-  df = pandas_gbq.read_gbq(spørring, dialect="standard")
+  df = pandas_gbq.read_gbq(spørring, dialect="standard", project_id="nrk-datahub")
+  df["dato"]=pd.to_datetime(df.dato)
+#+end_src
+** Plotting av data
+#+begin_src python :results graphics file output :file tidsserie.svg
+  fig,ax=plt.subplots()
+  ax.plot(df.dato, df.klienter)
+  plt.show()
 #+end_src
 
+#+RESULTS:
+[[file:tidsserie.svg]]
+Her ser jeg på tallene fra og med 1. juli 2023.
+#+begin_src python :results graphics file output :file tidsserie_juli.svg
+  fig,ax=plt.subplots()
+  ax.plot(df[df.dato >= "2023-07-01"].dato, df[df.dato >= "2023-07-01"].klienter)
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie.svg]]
+** Logaritmisk
+#+begin_src  python :results graphics file output :file tidsserie_log.svg
+  fig,ax=plt.subplots()
+  ax.plot(df[df.dato >= "2023-07-01"].dato, np.log(df[df.dato >= "2023-07-01"].klienter))
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie_log.svg]]
+Denne kurven ser ut som en del av en sinuskurve. Hvor stor del av en periode utgjør denne tidsperioden hvis vi ser på 365 dager som en periode?
+#+begin_src python
+  len(df[df.dato >= "2023-07-01"].dato)/365
+#+end_src
+
+#+RESULTS:
+: 0.9095890410958904
+*** Tilpassing av sinusbølge til data
+Her prøver jeg først en manuell tilnærming.
+#+begin_src python :results silent
+  def sinusbølge(t, A, phi, B):
+      """Sinusbølge ved tidspunkt t for amplitude A, frekvens f og fase phi forskjøvet en høyde B."""
+      return A*np.sin(2*pi*t+phi) + B
+#+end_src
+
+#+begin_src python :results graphics file output :file tidsserie_sin.svg
+  t = np.linspace(1,len(df[df.dato >= "2023-07-01"].dato),len(df[df.dato >= "2023-07-01"].dato))/365
+  fig,ax=plt.subplots()
+  ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter))
+  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, .4, 1,-pi/2,13.4))
+  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, .35, 1,-pi/7*4,13.4))
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie_sin.svg]]
+
+Nå skal jeg lage en tilpasning som er maskinell basert på minste kvadrater.
+#+begin_src python :results graphics file output :file tidsserie_fit.svg
+  popt, pcov = curve_fit(sinusbølge,
+                         np.linspace(1, len(df[df.dato >= "2023-07-01"].dato),
+                                     len(df[df.dato >= "2023-07-01"].dato)),
+                         log(df[df.dato >= "2023-07-01"].klienter).values,
+                         [.35,-pi/7*4,13.4], bounds=([.3,-pi*3/5,13.2],[.45,-pi/2,13.4]))
+  fig,ax=plt.subplots()
+  ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter))
+  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, *popt))
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie_fit.svg]]
+
+#+begin_src python :results graphics file output :file tidsserie_fit_diff.svg
+  fig,ax=plt.subplots()
+  ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter) - sinusbølge(t, *popt))
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie_fit_diff.svg]]
+Jeg prøver med en tilpasning til denne også.
+#+begin_src python :results silent
+  def sinusbølge2(t, A, f, phi, B):
+      """Sinusbølge ved tidspunkt t for amplitude A, frekvens f og fase phi forskjøvet en høyde B."""
+      return A*np.sin(2*pi*f*t+phi) + B
+#+end_src
+
+#+begin_src python :results graphics file output :file tidsserie_sin2.svg
+  fig,ax=plt.subplots()
+  diff = log(df[df.dato >= "2023-07-01"].klienter) - sinusbølge(t, *popt)
+  A, f, phi, B = .15, 1.5, -pi/4, 0
+  ax.plot(df[df.dato >= "2023-07-01"].dato, diff)
+  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, A,phi,B))
+  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge2(t, A,f,phi,B))
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie_sin2.svg]]
+
+#+begin_src python :results graphics file output :file tidsserie_fit2.svg
+  A, f, phi, B = .15, 1.5, -pi/4, 0
+  popt2, pcov2 = curve_fit(sinusbølge2,
+                         np.linspace(1, len(df[df.dato >= "2023-07-01"].dato),
+                                     len(df[df.dato >= "2023-07-01"].dato)),
+                         diff,
+                         [A, f, phi,B], bounds=([A-.03,f-.1,phi-.1,B-.02],[A+.03,f+.1,phi+.1,B+.02]))
+  fig,ax=plt.subplots()
+  ax.plot(df[df.dato >= "2023-07-01"].dato, diff)
+  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge2(t, *popt2))
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie_fit2.svg]]
+
+** Ukesdifferanse
+#+begin_src python :results graphics file output :file tidsserie_diff.svg
+  fig,ax=plt.subplots()
+  ax.plot(df[df.dato >= "2023-07-01"].dato, df.shift(7)[df.dato >= "2023-07-01"].klienter - df[df.dato >= "2023-07-01"].klienter)
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:tidsserie_diff.svg]]
+
+** Konklusjon
+De rå besøkstallene kan se ut som en del av en sinuskurve.
