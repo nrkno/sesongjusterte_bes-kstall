@@ -2,7 +2,7 @@
 #+STARTUP: indent
 #+TITLE: Sesongjustering av besøkstall
 #+EXPORT_FILE_NAME: readme.org
-#+PROPERTY: header-args:python :session *Python* :tangle kode.py :comments both :eval never-export :exports both
+#+PROPERTY: header-args:python :session *Python* :tangle kode.py :comments both :eval never-export :exports both :results silent
 #+PROPERTY: header-args:bash :results silent
 * Oppsett av Pythonmiljø
 Jeg bruker et Docker-bilde.
@@ -63,12 +63,13 @@ Nå starter jeg opp beholderen.
 * Innledende undersøkelse
 ** Pythonbiblioteker
 #+begin_src python :results silent
-  import matplotlib.pyplot as plt
-  import pandas as pd
-  import pandas_gbq
-  from numpy import sqrt, pi, log
-  from scipy.optimize import curve_fit
-#+end_src
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import pandas_gbq
+    import statsmodels.api as sm
+    from numpy import sqrt, pi, log, linspace, sin, column_stack, ones
+    from scipy.optimize import curve_fit
+  #+end_src
 ** Spørringer
 #+name: spørring
 #+begin_src bigquery
@@ -84,8 +85,22 @@ Nå starter jeg opp beholderen.
   spørring = """
   <<spørring>>
   """
-  df = pandas_gbq.read_gbq(spørring, dialect="standard", project_id="nrk-datahub")
-  df["dato"]=pd.to_datetime(df.dato)
+  df_org = pandas_gbq.read_gbq(spørring, dialect="standard", project_id="nrk-datahub")
+  df_org["dato"]=pd.to_datetime(df_org.dato)
+  df = df_org.copy()
+#+end_src
+** Hjelpefunksjoner
+*** Sinuskurve
+#+begin_src python
+  def sinusbølge(t, A, phi, f=1, B=0):
+      """Sinusbølge ved tidspunkt t for amplitude A, frekvens f og fase phi forskjøvet en høyde B."""
+      return A*sin(2*pi*t*f + phi) + B
+#+end_src
+
+*** Parameterverdier i forklaring
+#+begin_src python
+  def print_pars(A, phi, f=1, B=0):
+      return f"A={A}, f={f}, phi={phi}, B={B}"
 #+end_src
 ** Plotting av data
 #+begin_src python :results graphics file output :file tidsserie.svg
@@ -96,6 +111,7 @@ Nå starter jeg opp beholderen.
 
 #+RESULTS:
 [[file:tidsserie.svg]]
+
 Her ser jeg på tallene fra og med 1. juli 2023.
 #+begin_src python :results graphics file output :file tidsserie_juli.svg
   fig,ax=plt.subplots()
@@ -104,38 +120,62 @@ Her ser jeg på tallene fra og med 1. juli 2023.
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie.svg]]
+[[file:tidsserie_juli.svg]]
+
+Figuren viser at tidsserien har ukentlige og årlige sesongvariasjoner. I tillegg kan det se ut til at den ukentlige sesonvariasjonen øker når antall besøkende øker. Dette er et tegn på at tidsserien er heteroskedastisk, og dermed ikke stasjonær. For å bøte på dette kan vi prøve å gjøre en logaritmisk transformasjon.
 ** Logaritmisk
 #+begin_src  python :results graphics file output :file tidsserie_log.svg
   fig,ax=plt.subplots()
-  ax.plot(df[df.dato >= "2023-07-01"].dato, np.log(df[df.dato >= "2023-07-01"].klienter))
+  ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter))
   plt.show()
 #+end_src
 
 #+RESULTS:
 [[file:tidsserie_log.svg]]
-Denne kurven ser ut som en del av en sinuskurve. Hvor stor del av en periode utgjør denne tidsperioden hvis vi ser på 365 dager som en periode?
+
+Tallverdien er nå mindre og vi kan gå videre med å prøve å lage en tidsseriemodell.
+
+Denne kurven ser ut som en del av en sinuskurve med en trend som går oppover. Først fjerner jeg trenden ved å estimere den med en lineær regresjon.
 #+begin_src python
-  len(df[df.dato >= "2023-07-01"].dato)/365
+  df = df_org[df_org.dato >= "2023-07-01"]
+  df.loc[:,"log_klienter"] = log(df.klienter)
+  y = df.log_klienter
+  x = linspace(1, len(df.klienter), len(df.klienter))
+  X = sm.add_constant(x)
+  res = sm.OLS(y,X).fit()
+
+  fig,ax=plt.subplots()
+  ax.plot(df.dato, res.fittedvalues, label="trend")
+  ax.plot(df.dato, df.log_klienter, label="observasjoner")
+  ax.legend()
+#+end_src
+
+Nå prøver jeg å subtrahere verdien av trenden fra observasjonene.
+#+begin_src python
+  df.loc[:,"log_klienter_detrended"] = df.log_klienter - res.fittedvalues
+  
+  fig,ax=plt.subplots()
+  ax.plot(df.dato, df.log_klienter_detrended, label="Uten trend")
+  ax.legend()
+#+end_src
+
+Hvor stor del av en periode utgjør denne tidsperioden hvis vi ser på 365 dager som en periode?
+#+begin_src python :results replace
+  len(df.dato)/365
 #+end_src
 
 #+RESULTS:
-: 0.9095890410958904
+: 1.8520547945205479
+
 *** Tilpassing av sinusbølge til data
 Her prøver jeg først en manuell tilnærming.
-#+begin_src python :results silent
-  def sinusbølge(t, A, phi, B):
-      """Sinusbølge ved tidspunkt t for amplitude A, frekvens f og fase phi forskjøvet en høyde B."""
-      return A*np.sin(2*pi*t+phi) + B
-#+end_src
 
 #+begin_src python :results graphics file output :file tidsserie_sin.svg
-  t = np.linspace(1,len(df[df.dato >= "2023-07-01"].dato),len(df[df.dato >= "2023-07-01"].dato))/365
+  t = linspace(1,len(df.dato),len(df.dato))/365
   fig,ax=plt.subplots()
-  ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter))
-  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, .4, 1,-pi/2,13.4))
-  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, .35, 1,-pi/7*4,13.4))
-  plt.show()
+  ax.plot(df.dato, df.log_klienter_detrended)
+  ax.plot(df.dato, sinusbølge(t, .3, -pi/9*4, .96), label=print_pars("0,3", "-pi/9*4", "0,96"))
+  ax.legend()
 #+end_src
 
 #+RESULTS:
@@ -143,73 +183,70 @@ Her prøver jeg først en manuell tilnærming.
 
 Nå skal jeg lage en tilpasning som er maskinell basert på minste kvadrater.
 #+begin_src python :results graphics file output :file tidsserie_fit.svg
-  popt, pcov = curve_fit(sinusbølge,
-                         np.linspace(1, len(df[df.dato >= "2023-07-01"].dato),
-                                     len(df[df.dato >= "2023-07-01"].dato)),
-                         log(df[df.dato >= "2023-07-01"].klienter).values,
-                         [.35,-pi/7*4,13.4], bounds=([.3,-pi*3/5,13.2],[.45,-pi/2,13.4]))
+  startverdier1=[.25,-pi/9*4, .96, 0]
+  # startverdier2=[.3,-3*pi/5,13.3,1]
+  b1=([.15,-pi/2,.9, -.1],[.35,-pi/5*2,1.1,.1])
+  # b2=([.2,-pi*5/7,13.2,.9],[.5,-pi*3/5,13.5,1.1])
+  # t=linspace(1, len(df[df.dato >= "2023-07-01"].dato),
+  #            len(df[df.dato >= "2023-07-01"].dato))
+  log_verdier=df.log_klienter_detrended.values
+  popt11, pcov11 = curve_fit(sinusbølge, t, log_verdier,
+                             startverdier1, bounds=b1)
+  # popt12, pcov12 = curve_fit(sinusbølge, t, log_verdier,
+  #                            startverdier2, bounds=b2)
   fig,ax=plt.subplots()
-  ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter))
-  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, *popt))
-  plt.show()
+  ax.plot(df.dato, log_verdier)
+  ax.plot(df.dato, sinusbølge(t, *popt11), label=print_pars(*popt11))
+  ax.legend()
 #+end_src
 
 #+RESULTS:
 [[file:tidsserie_fit.svg]]
 
+Her prøver jeg å trekke tilpasningen fra dataene og se hva jeg sitter igjen med.
 #+begin_src python :results graphics file output :file tidsserie_fit_diff.svg
   fig,ax=plt.subplots()
-  ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter) - sinusbølge(t, *popt))
-  plt.show()
+  ax.plot(df.dato, log_verdier - sinusbølge(t, *popt11), label=print_pars(*popt11))
+  ax.legend()
 #+end_src
 
 #+RESULTS:
 [[file:tidsserie_fit_diff.svg]]
-Jeg prøver med en tilpasning til denne også.
-#+begin_src python :results silent
-  def sinusbølge2(t, A, f, phi, B):
-      """Sinusbølge ved tidspunkt t for amplitude A, frekvens f og fase phi forskjøvet en høyde B."""
-      return A*np.sin(2*pi*f*t+phi) + B
-#+end_src
 
-#+begin_src python :results graphics file output :file tidsserie_sin2.svg
-  fig,ax=plt.subplots()
-  diff = log(df[df.dato >= "2023-07-01"].klienter) - sinusbølge(t, *popt)
-  A, f, phi, B = .15, 1.5, -pi/4, 0
-  ax.plot(df[df.dato >= "2023-07-01"].dato, diff)
-  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge(t, A,phi,B))
-  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge2(t, A,f,phi,B))
-  plt.show()
-#+end_src
-
-#+RESULTS:
-[[file:tidsserie_sin2.svg]]
-
-#+begin_src python :results graphics file output :file tidsserie_fit2.svg
-  A, f, phi, B = .15, 1.5, -pi/4, 0
-  popt2, pcov2 = curve_fit(sinusbølge2,
-                         np.linspace(1, len(df[df.dato >= "2023-07-01"].dato),
-                                     len(df[df.dato >= "2023-07-01"].dato)),
-                         diff,
-                         [A, f, phi,B], bounds=([A-.03,f-.1,phi-.1,B-.02],[A+.03,f+.1,phi+.1,B+.02]))
-  fig,ax=plt.subplots()
-  ax.plot(df[df.dato >= "2023-07-01"].dato, diff)
-  ax.plot(df[df.dato >= "2023-07-01"].dato, sinusbølge2(t, *popt2))
-  plt.show()
-#+end_src
-
-#+RESULTS:
-[[file:tidsserie_fit2.svg]]
 
 ** Ukesdifferanse
+En vanlig teknikk i tidsseriemodellering er å subtrahere verdien som kommer et gitt antall stidssteg før fra den gjeldende verdien. For eksempel i en ukessyklus vil dagens verdi være likere verdien for samme dag forrige uke enn gårsdagens verdi.
+
+Jeg starter først med å se på ukesdifferansene på den ubehandlede tidsserien og sammenligner den med resultatet fra over.
 #+begin_src python :results graphics file output :file tidsserie_diff.svg
-  fig,ax=plt.subplots()
-  ax.plot(df[df.dato >= "2023-07-01"].dato, df.shift(7)[df.dato >= "2023-07-01"].klienter - df[df.dato >= "2023-07-01"].klienter)
+  fig,ax=plt.subplots(nrows=2, layout='constrained')
+  ax[0].plot(df.dato, log_verdier.shift(7) - log_verdier)
+  ax[1].plot(df.dato, log_verdier - sinusbølge(t, *popt11))
+  ax[0].set_title("ukesdiff")
+  ax[1].set_title("sesongjustert")
   plt.show()
 #+end_src
 
 #+RESULTS:
 [[file:tidsserie_diff.svg]]
+Spesielt rundt jul og 17. mai er det store utslag.
+
+Nå ser jeg på ukedifferansen på differansen etter den første sinustilpasningen.
+#+begin_src python :results graphics file output :file ukesdiff_etter_sinustilpasning.svg
+  df.loc[:,"log_klienter_sesongjustert"] = log_verdier - sinusbølge(t, *popt11)
+  fig,ax=plt.subplots(nrows=2, layout='constrained')
+  ax[0].plot(df.dato, log_verdier.shift(7) - log_verdier)
+  ax[0].set_title("ukesdiff")
+  ax[1].plot(df.dato, df.log_klienter_sesongjustert.shift(7) - df.log_klienter_sesongjustert)
+  ax[1].set_title("sesongjustert og ukesdiff")
+  plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:ukesdiff_etter_sinustilpasning.svg]]
+
+Det har tilsynelatende ingen effekt å tilpasse med en sinusbølge før man gjør en ukesdifferanse.
+
 
 ** Konklusjon
 De rå besøkstallene kan se ut som en del av en sinuskurve.
