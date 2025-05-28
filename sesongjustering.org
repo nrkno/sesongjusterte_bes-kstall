@@ -63,25 +63,60 @@ Nå starter jeg opp beholderen.
 * Innledende undersøkelse
 ** Pythonbiblioteker
 #+begin_src python :results silent
-    import matplotlib.pyplot as plt
-    import pandas as pd
-    import pandas_gbq
-    import statsmodels.api as sm
-    from numpy import sqrt, pi, log, linspace, sin, column_stack, ones
-    from scipy.optimize import curve_fit
+  import matplotlib as mpl
+  import matplotlib.pyplot as plt
+  import pandas as pd
+  import pandas_gbq
+  import statsmodels.api as sm
+  from numpy import sqrt, pi, log, linspace, sin, column_stack, ones
+  from scipy.optimize import curve_fit
+  from cycler import cycler
+
+  plt.rcParams['figure.constrained_layout.use'] = True
   #+end_src
 ** Spørringer
 #+name: spørring
 #+begin_src bigquery
-   SELECT partitionDate dato, HLL_COUNT.MERGE(visitorsSketch) klienter
-     FROM `nrk-datahub.snowplow_aggregate.service_daily_v01`
-    WHERE nrkService = 'nrktv'
-      AND partitionDate < CURRENT_DATE
-    GROUP BY 1
-    ORDER BY 1
+  SELECT partitionDate dato, HLL_COUNT.MERGE(visitorsSketch) klienter
+    FROM `nrk-datahub.snowplow_aggregate.service_daily_v01`
+   WHERE nrkService = 'nrktv'
+     AND partitionDate < CURRENT_DATE
+   GROUP BY 1
+   ORDER BY 1
+#+end_src
+
+#+name: progbesøk
+#+begin_src bigquery
+  WITH
+    d AS (
+      SELECT partitionDate dato, seriesTitleOrTitle, 
+             HLL_COUNT.MERGE(visitorsSketch) `besøkende`,
+        FROM `nrk-datahub.snowplow_aggregate.playback_daily_v02`
+             JOIN `nrk-datahub.metadata_views.metadata_programs` USING(contentKey)
+        WHERE partitionDate < CURRENT_DATE
+          AND nrkService = 'nrktv'
+        GROUP BY ALL),
+
+    dd AS (
+      SELECT partitionDate dato,  
+             HLL_COUNT.MERGE(visitorsSketch) `tot besøkende`
+        FROM `nrk-datahub.snowplow_aggregate.playback_daily_v02`
+        WHERE partitionDate < CURRENT_DATE
+          AND nrkService = 'nrktv'
+        GROUP BY ALL),
+
+    r AS (
+      SELECT *, ROW_NUMBER() OVER(PARTITION BY dato ORDER BY `besøkende` DESC) rang
+        FROM d
+             JOIN dd USING(dato))
+    
+    SELECT *, ROUND(`besøkende` / `tot besøkende`, 5) andel
+      FROM r
+     WHERE rang < 2
+     ORDER BY 1, rang
 #+end_src
 ** Innlesning av data
-#+begin_src python :results silent :noweb yes
+#+begin_src python :noweb yes
   spørring = """
   <<spørring>>
   """
@@ -100,43 +135,66 @@ Nå starter jeg opp beholderen.
 *** Parameterverdier i forklaring
 #+begin_src python
   def print_pars(A, phi, f=1, B=0):
-      return f"A={A}, f={f}, phi={phi}, B={B}"
+      if isinstance(A, str):
+          return f"A={A}, f={f}, phi={phi}, B={B}"
+      elif isinstance(A, float):
+          return f"A={round(A, 2)}, f={round(f,2)}, phi={round(phi,2)}, B={round(B,2)}"
+#+end_src
+
+*** Fargelegging av datointervaller
+#+begin_src python
+  def fargelegg(ax, verdier):
+      for xmin, xmax, col in verdier.values():
+          ax.axvspan(xmin, xmax, color=col, alpha=.15)
 #+end_src
 ** Plotting av data
-#+begin_src python :results graphics file output :file tidsserie.svg
+#+begin_src python :results graphics file output :file tidsserie.png
+  jul="purple"
+  påske="orange"
+  sommer="green"
+  vm="steelblue"
+  spesielle_datoer = dict(
+      sommer23=["2023-07-01","2023-08-11", sommer],
+      jul23=["2023-12-01", "2023-12-25", jul],
+      påske24=["2024-03-22","2024-04-01", påske],
+      sommer24=["2024-07-01","2024-08-11", sommer],
+      jul24=["2024-12-01","2024-12-25", jul],
+      vm=["2025-02-22","2025-03-13", vm],
+      påske25=["2025-04-11","2025-04-21", påske])
+
   fig,ax=plt.subplots()
   ax.plot(df.dato, df.klienter)
-  plt.show()
+  fargelegg(ax, spesielle_datoer)
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie.svg]]
+[[file:tidsserie.png]]
 
 Her ser jeg på tallene fra og med 1. juli 2023.
-#+begin_src python :results graphics file output :file tidsserie_juli.svg
+#+begin_src python :results graphics file output :file tidsserie_juli.png
   fig,ax=plt.subplots()
   ax.plot(df[df.dato >= "2023-07-01"].dato, df[df.dato >= "2023-07-01"].klienter)
-  plt.show()
+  fargelegg(ax, spesielle_datoer)
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie_juli.svg]]
+[[file:tidsserie_juli.png]]
 
 Figuren viser at tidsserien har ukentlige og årlige sesongvariasjoner. I tillegg kan det se ut til at den ukentlige sesonvariasjonen øker når antall besøkende øker. Dette er et tegn på at tidsserien er heteroskedastisk, og dermed ikke stasjonær. For å bøte på dette kan vi prøve å gjøre en logaritmisk transformasjon.
 ** Logaritmisk
-#+begin_src  python :results graphics file output :file tidsserie_log.svg
+#+begin_src  python :results graphics file output :file tidsserie_log.png
   fig,ax=plt.subplots()
   ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter))
-  plt.show()
+  fargelegg(ax, spesielle_datoer)
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie_log.svg]]
+[[file:tidsserie_log.png]]
 
 Tallverdien er nå mindre og vi kan gå videre med å prøve å lage en tidsseriemodell.
-
+** Fjerne trend
 Denne kurven ser ut som en del av en sinuskurve med en trend som går oppover. Først fjerner jeg trenden ved å estimere den med en lineær regresjon.
-#+begin_src python
+#+begin_src python :results replace graphics file output :file tidsserietrend.png
   df = df_org[df_org.dato >= "2023-07-01"]
   df.loc[:,"log_klienter"] = log(df.klienter)
   y = df.log_klienter
@@ -145,32 +203,37 @@ Denne kurven ser ut som en del av en sinuskurve med en trend som går oppover. F
   res = sm.OLS(y,X).fit()
 
   fig,ax=plt.subplots()
-  ax.plot(df.dato, res.fittedvalues, label="trend")
   ax.plot(df.dato, df.log_klienter, label="observasjoner")
+  ax.plot(df.dato, res.fittedvalues, label="trend")
   ax.legend()
 #+end_src
 
+#+RESULTS:
+[[file:tidsserietrend.png]]
+
 Nå prøver jeg å subtrahere verdien av trenden fra observasjonene.
-#+begin_src python
+#+begin_src python :results replace graphics file output :file tidsserie_uten_trend.png
   df.loc[:,"log_klienter_detrended"] = df.log_klienter - res.fittedvalues
   
   fig,ax=plt.subplots()
   ax.plot(df.dato, df.log_klienter_detrended, label="Uten trend")
   ax.legend()
-#+end_src
-
-Hvor stor del av en periode utgjør denne tidsperioden hvis vi ser på 365 dager som en periode?
-#+begin_src python :results replace
-  len(df.dato)/365
+  fargelegg(ax, spesielle_datoer)
 #+end_src
 
 #+RESULTS:
-: 1.8520547945205479
+[[file:tidsserie_uten_trend.png]]
 
-*** Tilpassing av sinusbølge til data
+
+** Tilpassing av sinusbølge til data
+Nå prøver jeg å tilpasse dette til en sinusbølge. En sinusbølge er gitt ved det matematiske uttrykket
+#+begin_export latex
+A\sin(2\pi ft + \phi).
+#+end_export
+
 Her prøver jeg først en manuell tilnærming.
 
-#+begin_src python :results graphics file output :file tidsserie_sin.svg
+#+begin_src python :results replace graphics file output :file tidsserie_sin.png
   t = linspace(1,len(df.dato),len(df.dato))/365
   fig,ax=plt.subplots()
   ax.plot(df.dato, df.log_klienter_detrended)
@@ -179,21 +242,16 @@ Her prøver jeg først en manuell tilnærming.
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie_sin.svg]]
+[[file:tidsserie_sin.png]]
 
 Nå skal jeg lage en tilpasning som er maskinell basert på minste kvadrater.
-#+begin_src python :results graphics file output :file tidsserie_fit.svg
+#+begin_src python :results replace graphics file output :file tidsserie_fit.png
   startverdier1=[.25,-pi/9*4, .96, 0]
   # startverdier2=[.3,-3*pi/5,13.3,1]
   b1=([.15,-pi/2,.9, -.1],[.35,-pi/5*2,1.1,.1])
-  # b2=([.2,-pi*5/7,13.2,.9],[.5,-pi*3/5,13.5,1.1])
-  # t=linspace(1, len(df[df.dato >= "2023-07-01"].dato),
-  #            len(df[df.dato >= "2023-07-01"].dato))
   log_verdier=df.log_klienter_detrended.values
   popt11, pcov11 = curve_fit(sinusbølge, t, log_verdier,
                              startverdier1, bounds=b1)
-  # popt12, pcov12 = curve_fit(sinusbølge, t, log_verdier,
-  #                            startverdier2, bounds=b2)
   fig,ax=plt.subplots()
   ax.plot(df.dato, log_verdier)
   ax.plot(df.dato, sinusbølge(t, *popt11), label=print_pars(*popt11))
@@ -201,52 +259,107 @@ Nå skal jeg lage en tilpasning som er maskinell basert på minste kvadrater.
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie_fit.svg]]
+[[file:tidsserie_fit.png]]
 
 Her prøver jeg å trekke tilpasningen fra dataene og se hva jeg sitter igjen med.
-#+begin_src python :results graphics file output :file tidsserie_fit_diff.svg
+#+begin_src python :results replace graphics file output :file tidsserie_fit_diff.png
   fig,ax=plt.subplots()
-  ax.plot(df.dato, log_verdier - sinusbølge(t, *popt11), label=print_pars(*popt11))
-  ax.legend()
+  ax.plot(df.dato, log_verdier - sinusbølge(t, *popt11))
+  fargelegg(ax, spesielle_datoer)
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie_fit_diff.svg]]
+[[file:tidsserie_fit_diff.png]]
 
 
 ** Ukesdifferanse
-En vanlig teknikk i tidsseriemodellering er å subtrahere verdien som kommer et gitt antall stidssteg før fra den gjeldende verdien. For eksempel i en ukessyklus vil dagens verdi være likere verdien for samme dag forrige uke enn gårsdagens verdi.
+En vanlig teknikk i tidsseriemodellering er å subtrahere verdien som kommer et gitt antall stidssteg før fra den gjeldende verdien. For eksempel er det naturlig å tenke seg at i en ukessyklus vil dagens verdi være likere verdien for samme dag forrige uke enn gårsdagens verdi.
 
-Jeg starter først med å se på ukesdifferansene på den ubehandlede tidsserien og sammenligner den med resultatet fra over.
-#+begin_src python :results graphics file output :file tidsserie_diff.svg
+Jeg starter først med å se på ukesdifferansene på log-tidsserien og sammenligner den med resultatet fra over.
+#+begin_src python :results replace graphics file output :file tidsserie_diff.png
   fig,ax=plt.subplots(nrows=2, layout='constrained')
-  ax[0].plot(df.dato, log_verdier.shift(7) - log_verdier)
+  ax[0].plot(df.dato, log_verdier - log_verdier.shift(7))
   ax[1].plot(df.dato, log_verdier - sinusbølge(t, *popt11))
   ax[0].set_title("ukesdiff")
   ax[1].set_title("sesongjustert")
-  plt.show()
+  fargelegg(ax[0], spesielle_datoer)
+  fargelegg(ax[1], spesielle_datoer)
 #+end_src
 
 #+RESULTS:
-[[file:tidsserie_diff.svg]]
+[[file:tidsserie_diff.png]]
 Spesielt rundt jul og 17. mai er det store utslag.
 
-Nå ser jeg på ukedifferansen på differansen etter den første sinustilpasningen.
-#+begin_src python :results graphics file output :file ukesdiff_etter_sinustilpasning.svg
-  df.loc[:,"log_klienter_sesongjustert"] = log_verdier - sinusbølge(t, *popt11)
-  fig,ax=plt.subplots(nrows=2, layout='constrained')
-  ax[0].plot(df.dato, log_verdier.shift(7) - log_verdier)
-  ax[0].set_title("ukesdiff")
-  ax[1].plot(df.dato, df.log_klienter_sesongjustert.shift(7) - df.log_klienter_sesongjustert)
-  ax[1].set_title("sesongjustert og ukesdiff")
+** Kovariater
+En annen teknikk er å legge til kovariater som man tenker kan påvirke besøkstallet. En slik kovariat kan være hverdag/helg. En annen kan være dager det er spesielle hendelser eller programmer som trekker flere besøkende. Vi har allerede sett tydelig at jul, påske, ski-VM og Maskorama er eksempler på hendelser og programmer som har en sånn effekt.
+
+Hvordan kan vi identifisere programmer eller hendelser som trekker besøkende? Dager der det sendes programmer som gir mange besøk skiller seg gjerne ut i tidsserien. Avstanden mellom lave og høye verdier for antall besøkende i løpet av én uke blir stor disse stedene. La oss ta en glidende maks-, min- og snittverdi med et vindu på én uke for å se hva det viser. Vi ser også på forskjellen mellom maks og min.
+
+#+begin_src python
+  fig,axs=plt.subplots(nrows=2)
+  ax=axs[0]
+  ax.plot(df.dato, df.klienter.rolling(window=7).min(), label="min")
+  ax.plot(df.dato, df.klienter.rolling(window=7).mean(), label="snitt")
+  ax.plot(df.dato, df.klienter.rolling(window=7).max(), label="maks")
+  ax.legend()
+  ax=axs[1]
+  ax.plot(df.dato, df.klienter.rolling(window=7).max() - df.klienter.rolling(window=7).min(), label="diff")
+  ax.legend()
   plt.show()
 #+end_src
 
-#+RESULTS:
-[[file:ukesdiff_etter_sinustilpasning.svg]]
+La oss videre se på hvilke programmer som har fått flest besøkende hver dag i perioden vi så på over. Jeg markerer dagene hvor Dagsrevyen har vært dette programmet.
+#+begin_src python :noweb yes
+  spørring = """
+  <<progbesøk>>
+  """
 
-Det har tilsynelatende ingen effekt å tilpasse med en sinusbølge før man gjør en ukesdifferanse.
+  pb_org = pandas_gbq.read_gbq(spørring, dialect="standard", project_id="nrk-datahub")
+  pb_org["dato"] = pd.to_datetime(pb_org.dato)
+  pb_org["seriesTitleOrTitle"] = pb_org.seriesTitleOrTitle.astype("string")
+  pb = pb_org.copy()
+#+end_src
 
+#+begin_src python
+  with mpl.rc_context({"axes.prop_cycle" : cycler(color=plt.get_cmap("tab20").colors)}):
+    fig,axs=plt.subplots(nrows=2)
+    axs[0].plot(pb.dato, pb.besøkende, label="besøkende")
+    axs[1].plot(pb.dato, pb.andel, label="andel av tot besøkende")
+    for p, m in zip(pb.seriesTitleOrTitle.value_counts().index, 20*["o"]+20*["s"]+11*["x"]):
+        axs[0].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].besøkende, m, label=p)
+        axs[1].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].andel, m)
 
+    fig.legend(loc="outside center left")
+    plt.show()
+#+end_src
+
+#+begin_src python
+  df["klienter_glid_min"] = df.klienter.rolling(window=7).min()
+  df["klienter_glid_snitt"] = df.klienter.rolling(window=7).mean()
+  df["klienter_glid_maks"] = df.klienter.rolling(window=7).max()
+#+end_src
+
+#+begin_src python  
+  with mpl.rc_context({"axes.prop_cycle" : cycler(color=plt.get_cmap("tab20").colors)}):
+    fig,axs=plt.subplots(nrows=4)
+    ax=axs[0]
+    ax.plot(df.dato, df.klienter_glid_min / df.klienter_glid_min.max(), label="min")
+    ax.plot(df.dato, df.klienter_glid_snitt / df.klienter_glid_snitt.max(), label="snitt")
+    ax.plot(df.dato, df.klienter_glid_maks / df.klienter_glid_maks.max(), label="maks")
+    ax.legend()
+    ax=axs[1]
+    ax.plot(df.dato, df.klienter_glid_maks / df.klienter_glid_maks.max() - df.klienter_glid_min / df.klienter_glid_min.max(), label="diff")
+    ax.legend()
+    axs[2].plot(pb.dato, pb.besøkende / pb.besøkende.max(), label="besøkende")
+    axs[3].plot(pb.dato, pb.andel / pb.andel.max(), label="andel av tot besøkende")
+    for p, m in zip(pb.seriesTitleOrTitle.value_counts().index, 20*["o"]+20*["s"]+11*["x"]):
+      axs[2].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].besøkende / pb.besøkende.max(), m, label=p)
+      axs[3].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].andel / pb.andel.max(), m)
+
+    fig.legend(loc="outside center left")
+    plt.show()
+#+end_src
+** Stykkevis regresjon
+Jeg har lyst til å prøve å lage stykkevis
 ** Konklusjon
 De rå besøkstallene kan se ut som en del av en sinuskurve.
