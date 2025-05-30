@@ -89,7 +89,7 @@ Nå starter jeg opp beholderen.
 #+begin_src bigquery
   WITH
     d AS (
-      SELECT partitionDate dato, seriesTitleOrTitle, 
+      SELECT partitionDate dato, seriesTitleOrTitle prog, 
              HLL_COUNT.MERGE(visitorsSketch) `besøkende`,
         FROM `nrk-datahub.snowplow_aggregate.playback_daily_v02`
              JOIN `nrk-datahub.metadata_views.metadata_programs` USING(contentKey)
@@ -105,15 +105,30 @@ Nå starter jeg opp beholderen.
           AND nrkService = 'nrktv'
         GROUP BY ALL),
 
-    r AS (
-      SELECT *, ROW_NUMBER() OVER(PARTITION BY dato ORDER BY `besøkende` DESC) rang
-        FROM d
-             JOIN dd USING(dato))
+    s AS (
+      SELECT *, ROUND(`besøkende` / `tot besøkende`, 5) andel,
+             ROW_NUMBER() OVER(PARTITION BY dato ORDER BY `besøkende` DESC) rang
+        FROM dd
+             JOIN d USING(dato)),
     
-    SELECT *, ROUND(`besøkende` / `tot besøkende`, 5) andel
-      FROM r
-     WHERE rang < 2
-     ORDER BY 1, rang
+    udr AS (
+      SELECT *
+        FROM s
+       WHERE prog != 'Dagsrevyen'),
+    
+    topp_udr AS (
+      SELECT dato,
+            STRING_AGG(prog ORDER BY andel DESC LIMIT 1) prog,
+            ARRAY_AGG(`besøkende` ORDER BY rang LIMIT 1)[OFFSET(0)] `besøkende`,
+            ARRAY_AGG(andel ORDER BY rang LIMIT 1)[OFFSET(0)] andel,
+            ARRAY_AGG(rang ORDER BY rang LIMIT 1)[OFFSET(0)] rang
+        FROM udr
+      GROUP BY ALL)
+    
+    SELECT *
+      FROM topp_udr t
+           JOIN (SELECT dato, `besøkende` `besøk_dr`, andel andel_dr, rang rang_dr FROM s WHERE prog = 'Dagsrevyen') dr USING(dato)
+     ORDER BY dato
 #+end_src
 ** Innlesning av data
 #+begin_src python :noweb yes
@@ -308,7 +323,7 @@ Hvordan kan vi identifisere programmer eller hendelser som trekker besøkende? D
   plt.show()
 #+end_src
 
-La oss videre se på hvilke programmer som har fått flest besøkende hver dag i perioden vi så på over. Jeg markerer dagene hvor Dagsrevyen har vært dette programmet.
+La oss videre se på hvilke programmer som har fått flest besøkende hver dag i perioden vi så på over. Jeg vet at Dagsrevyen ofte får mange besøkende, og jeg har derfor lagt inn tallene for dette programmet som egne kolonner.
 #+begin_src python :noweb yes
   spørring = """
   <<progbesøk>>
@@ -316,23 +331,53 @@ La oss videre se på hvilke programmer som har fått flest besøkende hver dag i
 
   pb_org = pandas_gbq.read_gbq(spørring, dialect="standard", project_id="nrk-datahub")
   pb_org["dato"] = pd.to_datetime(pb_org.dato)
-  pb_org["seriesTitleOrTitle"] = pb_org.seriesTitleOrTitle.astype("string")
+  pb_org["prog"] = pb_org.prog.astype("string")
   pb = pb_org.copy()
 #+end_src
 
+La meg først vise fordelingen over rangeringen av Dagsrevyen.
+#+begin_src python :results replace
+  pb.rang_dr.value_counts()
+#+end_src
+
+#+RESULTS:
+#+begin_example
+rang_dr
+1     463
+2     151
+3     104
+4      28
+5      10
+16      1
+13      1
+6       1
+15      1
+Name: count, dtype: Int64
+#+end_example
+
+Som jeg mistenkte er Dagsrevyen det mest besøkte programmet de fleste dagene.
+
+Nå tegner jeg opp besøkstallene for Dagsrevyen og det mest besøkte programmet hver dag.
 #+begin_src python
   with mpl.rc_context({"axes.prop_cycle" : cycler(color=plt.get_cmap("tab20").colors)}):
     fig,axs=plt.subplots(nrows=2)
-    axs[0].plot(pb.dato, pb.besøkende, label="besøkende")
-    axs[1].plot(pb.dato, pb.andel, label="andel av tot besøkende")
-    for p, m in zip(pb.seriesTitleOrTitle.value_counts().index, 20*["o"]+20*["s"]+11*["x"]):
-        axs[0].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].besøkende, m, label=p)
-        axs[1].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].andel, m)
+    axs[0].plot(pb.dato, pb.besøkende)
+    axs[0].plot(pb.dato, pb.besøk_dr, color="tab:orange")
+    axs[1].plot(pb.dato, pb.andel)
+    axs[1].plot(pb.dato, pb.andel_dr, color="tab:orange")
+    for p, m in zip(pb.prog.value_counts().index, 20*["o"]+20*["s"]+11*["x"]):
+        axs[0].plot(pb.loc[pb.prog == p].dato, pb.loc[pb.prog == p].besøkende, m, label=p)
+        axs[1].plot(pb.loc[pb.prog == p].dato, pb.loc[pb.prog == p].andel, m)
 
     fig.legend(loc="outside center left")
+    axs[0].set_title("Antall besøkende")
+    axs[1].set_title("Andel besøkende")
     plt.show()
 #+end_src
 
+Dagsrevyen er en veldig stabil besøksdriver. Av den grunn vil jeg prøve å gjøre en tidsserieanalyse av disse tallene.
+
+*** Normaliserte tall (må oppdateres til gjeldende spørring)
 #+begin_src python
   df["klienter_glid_min"] = df.klienter.rolling(window=7).min()
   df["klienter_glid_snitt"] = df.klienter.rolling(window=7).mean()
@@ -352,14 +397,83 @@ La oss videre se på hvilke programmer som har fått flest besøkende hver dag i
     ax.legend()
     axs[2].plot(pb.dato, pb.besøkende / pb.besøkende.max(), label="besøkende")
     axs[3].plot(pb.dato, pb.andel / pb.andel.max(), label="andel av tot besøkende")
-    for p, m in zip(pb.seriesTitleOrTitle.value_counts().index, 20*["o"]+20*["s"]+11*["x"]):
-      axs[2].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].besøkende / pb.besøkende.max(), m, label=p)
-      axs[3].plot(pb.loc[pb.seriesTitleOrTitle == p].dato, pb.loc[pb.seriesTitleOrTitle == p].andel / pb.andel.max(), m)
+    for p, m in zip(pb.prog.value_counts().index, 20*["o"]+20*["s"]+11*["x"]):
+      axs[2].plot(pb.loc[pb.prog == p].dato, pb.loc[pb.prog == p].besøkende / pb.besøkende.max(), m, label=p)
+      axs[3].plot(pb.loc[pb.prog == p].dato, pb.loc[pb.prog == p].andel / pb.andel.max(), m)
 
     fig.legend(loc="outside center left")
     plt.show()
 #+end_src
-** Stykkevis regresjon
+
+**** Stykkevis regresjon
 Jeg har lyst til å prøve å lage stykkevis
+
+** Tidsserieanalyse av Dagsrevyens besøkstall
+Jeg tegner opp besøkstallene for Dagsrevyen på nytt fra 1. juli 2023
+#+begin_src python
+  df_dr = pb.loc[pb.dato >= "2023-07-01", ["dato","besøk_dr"]].rename(columns={"besøk_dr":"besøk"})
+#+end_src
+
+#+begin_src python
+  fig,ax=plt.subplots()
+  ax.plot(df_dr.dato, df_dr.besøk, color="tab:orange")
+  plt.show()
+#+end_src
+
+Først tar jeg logartimen og finner trenden.
+#+begin_src python
+  df_dr["log_besøk"] = log(df_dr.besøk)
+  y = df_dr.log_besøk
+  x = linspace(1, len(df_dr.besøk), len(df_dr.besøk))
+  X = sm.add_constant(x)
+  res = sm.OLS(y,X).fit()
+
+  fig,ax=plt.subplots()
+  ax.plot(df_dr.dato, res.fittedvalues, label="trend")
+  ax.plot(df_dr.dato, df_dr.log_besøk, label="observasjoner")
+  ax.legend()
+  plt.show()
+#+end_src
+
+Her er tidsserien uten trend.
+#+begin_src python
+  df_dr["log_avtrendet"] = df_dr.log_besøk - res.fittedvalues
+  fig,ax=plt.subplots()
+  ax.plot(df_dr.dato, df_dr.log_avtrendet)
+  plt.show()
+#+end_src
+
+Nå prøver jeg igjen med en sinuskurve.
+#+begin_src python
+  t = linspace(1,len(df_dr.dato),len(df_dr.dato))/365
+  startverdier1=[.15,-pi/9*4, .96, 0]
+  # startverdier2=[.3,-3*pi/5,13.3,1]
+  b1=([.05,-pi/2,.9, -.1],[.35,-pi/5*2,1.1,.1])
+  log_verdier=df_dr.log_avtrendet.values
+  popt11, pcov11 = curve_fit(sinusbølge, t, log_verdier,
+                             startverdier1, bounds=b1)
+  fig,ax=plt.subplots()
+  ax.plot(df_dr.dato, log_verdier)
+  ax.plot(df_dr.dato, sinusbølge(t, *popt11), label=print_pars(*popt11))
+  ax.legend()
+  plt.show()
+#+end_src
+
+Her er tidsserien justert for sinuskurven.
+#+begin_src python
+  df_dr["sinusjustert"] = df_dr.log_avtrendet - sinusbølge(t, *popt11)
+  fig,ax=plt.subplots()
+  ax.plot(df_dr.dato, df_dr.sinusjustert)
+  plt.show()
+#+end_src
+
+Nå prøver jeg med ukesdiff på logbesøkstallene og viser dem sammen med resultatet fra ovenfor.
+#+begin_src python
+  df_dr["ukesdiff"] = df_dr.log_besøk - df_dr.log_besøk.shift(7)
+  fig,ax=plt.subplots()
+  ax.plot(df_dr.dato, df_dr.ukesdiff)
+  ax.plot(df_dr.dato, df_dr.sinusjustert)
+  plt.show()
+#+end_src
 ** Konklusjon
 De rå besøkstallene kan se ut som en del av en sinuskurve.
