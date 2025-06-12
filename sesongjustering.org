@@ -2,7 +2,7 @@
 #+STARTUP: indent
 #+TITLE: Sesongjustering av besøkstall
 #+EXPORT_FILE_NAME: readme.org
-#+PROPERTY: header-args:python :session *Python* :tangle kode.py :comments both :eval never-export :exports both :results silent :eval never
+#+PROPERTY: header-args:python :session *Python* :tangle kode.py :comments both :eval never-export :exports both :results silent :eval never-export
 #+PROPERTY: header-args:bash :results silent :eval never
 
 #+begin_src emacs-lisp :exports results :results none
@@ -375,9 +375,9 @@ Name: count, dtype: Int64
 Som jeg mistenkte er Dagsrevyen det mest besøkte programmet de fleste dagene.
 
 Nå tegner jeg opp besøkstallene for Dagsrevyen og det mest besøkte programmet hver dag.
-#+begin_src python  :results replace graphics file output :file fig/topprog.png
+#+begin_src python  :results replace graphics file output :file fig/topprog.png 
   with mpl.rc_context({"axes.prop_cycle" : cycler(color=plt.get_cmap("tab20").colors)}):
-    fig,axs=plt.subplots(nrows=2)
+    fig,axs=plt.subplots(nrows=2, figsize=(21,11))
     axs[0].plot(pb.dato, pb.besøkende)
     axs[0].plot(pb.dato, pb.besøk_dr, color="tab:orange")
     axs[1].plot(pb.dato, pb.andel)
