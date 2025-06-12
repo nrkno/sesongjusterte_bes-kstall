@@ -476,4 +476,6 @@ Nå prøver jeg med ukesdiff på logbesøkstallene og viser dem sammen med resul
   plt.show()
 #+end_src
 ** Konklusjon
-De rå besøkstallene kan se ut som en del av en sinuskurve.
+Vi har kommet et stykke på vei når det gjelder å plukke besøkstallene til NRK TV fra hverandre, men det vi sitter igjen med viser fortsatt tendenser til en periodisitet av noe slag.
+
+Tanken på å bruke besøkstallene til Dagsrevyen som en basis for besøkstallene er god, men må også jobbes mer med.
