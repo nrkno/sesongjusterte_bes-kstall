@@ -1,62 +1,49 @@
-#+STARTUP: fold
-#+STARTUP: indent
-#+TITLE: Sesongjustering av besøkstall
-#+EXPORT_FILE_NAME: readme.org
-#+PROPERTY: header-args:python :session *Python* :tangle kode.py :comments both :eval never-export :exports both :results silent :eval never
-#+PROPERTY: header-args:bash :results silent :eval never
-
-#+begin_src emacs-lisp :exports results :results none
-  ;; Dette gjør om bigquery-blokker til sql-blokker (for å få fargelegging på teksten)
-  ;; og fjerner results-nøkkelordet (som gjemmer resultatene på github)
-  (defun bytt-bigquery-til-sql (s backend info)
-    (replace-regexp-in-string "bigquery" "sql" s))
-
-  (defun fjern-resultatmerke (s backend info)
-    (replace-regexp-in-string "#\\+results:[ ]+" "" s))
-
-  (add-to-list 'org-export-filter-src-block-functions
-    	     'bytt-bigquery-til-sql)
-  (add-to-list 'org-export-filter-body-functions
-    	     'fjern-resultatmerke)
-#+end_src
+# Created 2025-06-12 to. 14:07
+#+title: Sesongjustering av besøkstall
+#+author: Emil
+#+startup: fold
+#+startup: indent
+#+export_file_name: readme.org
+#+property: header-args:python :session *Python* :tangle kode.py :comments both :eval never-export :exports both :results silent :eval never
+#+property: header-args:bash :results silent :eval never
 * Oppsett av Pythonmiljø
 Jeg bruker et Docker-bilde.
-#+begin_src dockerfile :tangle .devcontainer/Dockerfile
-FROM python:3.10-bookworm
+#+begin_src dockerfile
+  FROM python:3.10-bookworm
 
-WORKDIR /kode
+  WORKDIR /kode
 
-ENV PYTHONPAKKER="\
-numpy \
-matplotlib \
-scipy \
-statsmodels \
-pandas \
-pandas_gbq \
-pyright \
-# pandas_gbq vil ha denne \
-tqdm \
-scikit-learn \
-"
+  ENV PYTHONPAKKER="\
+  numpy \
+  matplotlib \
+  scipy \
+  statsmodels \
+  pandas \
+  pandas_gbq \
+  pyright \
+  # pandas_gbq vil ha denne \
+  tqdm \
+  scikit-learn \
+  "
 
-RUN python -m ensurepip --upgrade \
-    && python -m pip install --upgrade --no-cache-dir $PYTHONPAKKER
+  RUN python -m ensurepip --upgrade \
+      && python -m pip install --upgrade --no-cache-dir $PYTHONPAKKER
 #+end_src
 
 Dette er devcontainer.json-filen som konfigurerer byggingen av bildet og kjøringen av beholderen. Jeg setter merkelappen python_dv (python datavitenskap) på bildet, og gir det navnet sesongjustering når beholderen fyres opp.
-#+begin_src js :tangle .devcontainer/devcontainer.json
+#+begin_src js
   {
       "name": "Python datavitenskap",
       "build": {"dockerfile": "Dockerfile",
-    	      "options": ["-t", "python_dv"]},
+                "options": ["-t", "python_dv"]},
       "mounts": [{"source": "/tmp", "target": "/tmp", "type": "bind"},
-  	       {"source": "/home/n645982/.config/gcloud", "target": "/root/.config/gcloud", "type": "bind"}],
+                 {"source": "/home/n645982/.config/gcloud", "target": "/root/.config/gcloud", "type": "bind"}],
       "runArgs": ["-it", "--rm", "--name=sesongjustering"]
   }
 #+end_src
 * Konfigurering av Python shell i Emacs
 Dette skriptet gjør at jeg kan kjøre Python REPL-en i beholderen.
-#+begin_src bash :tangle docker-python-shell.sh
+#+begin_src bash
   #!/bin/bash
   devcontainer exec --workspace-folder . python
 #+end_src
@@ -77,7 +64,7 @@ Nå starter jeg opp beholderen.
 #+end_src
 * Innledende undersøkelse
 ** Pythonbiblioteker
-#+begin_src python :results silent
+#+begin_src python
   import matplotlib as mpl
   import matplotlib.pyplot as plt
   import pandas as pd
@@ -88,10 +75,10 @@ Nå starter jeg opp beholderen.
   from cycler import cycler
 
   plt.rcParams['figure.constrained_layout.use'] = True
-  #+end_src
+#+end_src
 ** Spørringer
 #+name: spørring
-#+begin_src bigquery
+#+begin_src sql
   SELECT partitionDate dato, HLL_COUNT.MERGE(visitorsSketch) klienter
     FROM `nrk-datahub.snowplow_aggregate.service_daily_v01`
    WHERE nrkService = 'nrktv'
@@ -101,7 +88,7 @@ Nå starter jeg opp beholderen.
 #+end_src
 
 #+name: progbesøk
-#+begin_src bigquery
+#+begin_src sql
   WITH
     d AS (
       SELECT partitionDate dato, seriesTitleOrTitle prog, 
@@ -125,12 +112,12 @@ Nå starter jeg opp beholderen.
              ROW_NUMBER() OVER(PARTITION BY dato ORDER BY `besøkende` DESC) rang
         FROM dd
              JOIN d USING(dato)),
-    
+
     udr AS (
       SELECT *
         FROM s
        WHERE prog != 'Dagsrevyen'),
-    
+
     topp_udr AS (
       SELECT dato,
             STRING_AGG(prog ORDER BY andel DESC LIMIT 1) prog,
@@ -139,16 +126,21 @@ Nå starter jeg opp beholderen.
             ARRAY_AGG(rang ORDER BY rang LIMIT 1)[OFFSET(0)] rang
         FROM udr
       GROUP BY ALL)
-    
+
     SELECT *
       FROM topp_udr t
            JOIN (SELECT dato, `besøkende` `besøk_dr`, andel andel_dr, rang rang_dr FROM s WHERE prog = 'Dagsrevyen') dr USING(dato)
      ORDER BY dato
 #+end_src
 ** Innlesning av data
-#+begin_src python :noweb yes
+#+begin_src python
   spørring = """
-  <<spørring>>
+  SELECT partitionDate dato, HLL_COUNT.MERGE(visitorsSketch) klienter
+    FROM `nrk-datahub.snowplow_aggregate.service_daily_v01`
+   WHERE nrkService = 'nrktv'
+     AND partitionDate < CURRENT_DATE
+   GROUP BY 1
+   ORDER BY 1
   """
   df_org = pandas_gbq.read_gbq(spørring, dialect="standard", project_id="nrk-datahub")
   df_org["dato"]=pd.to_datetime(df_org.dato)
@@ -161,7 +153,6 @@ Nå starter jeg opp beholderen.
       """Sinusbølge ved tidspunkt t for amplitude A, frekvens f og fase phi forskjøvet en høyde B."""
       return A*sin(2*pi*t*f + phi) + B
 #+end_src
-
 *** Parameterverdier i forklaring
 #+begin_src python
   def print_pars(A, phi, f=1, B=0):
@@ -170,7 +161,6 @@ Nå starter jeg opp beholderen.
       elif isinstance(A, float):
           return f"A={round(A, 2)}, f={round(f,2)}, phi={round(phi,2)}, B={round(B,2)}"
 #+end_src
-
 *** Fargelegging av datointervaller
 #+begin_src python
   def fargelegg(ax, verdier):
@@ -178,7 +168,7 @@ Nå starter jeg opp beholderen.
           ax.axvspan(xmin, xmax, color=col, alpha=.15)
 #+end_src
 ** Plotting av data
-#+begin_src python :results graphics file output :file fig/tidsserie.png
+#+begin_src python
   jul="purple"
   påske="orange"
   sommer="green"
@@ -197,34 +187,34 @@ Nå starter jeg opp beholderen.
   fargelegg(ax, spesielle_datoer)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie.png]]
 
 Her ser jeg på tallene fra og med 1. juli 2023.
-#+begin_src python :results graphics file output :file fig/tidsserie_juli.png
+#+begin_src python
   fig,ax=plt.subplots()
   ax.plot(df[df.dato >= "2023-07-01"].dato, df[df.dato >= "2023-07-01"].klienter)
   fargelegg(ax, spesielle_datoer)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie_juli.png]]
 
 Figuren viser at tidsserien har ukentlige og årlige sesongvariasjoner. I tillegg kan det se ut til at den ukentlige sesonvariasjonen øker når antall besøkende øker. Dette er et tegn på at tidsserien er heteroskedastisk, og dermed ikke stasjonær. For å bøte på dette kan vi prøve å gjøre en logaritmisk transformasjon.
 ** Logaritmisk
-#+begin_src  python :results graphics file output :file fig/tidsserie_log.png
+#+begin_src python
   fig,ax=plt.subplots()
   ax.plot(df[df.dato >= "2023-07-01"].dato, log(df[df.dato >= "2023-07-01"].klienter))
   fargelegg(ax, spesielle_datoer)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie_log.png]]
 
 Tallverdien er nå mindre og vi kan gå videre med å prøve å lage en tidsseriemodell.
 ** Fjerne trend
 Denne kurven ser ut som en del av en sinuskurve med en trend som går oppover. Først fjerner jeg trenden ved å estimere den med en lineær regresjon.
-#+begin_src python :results replace graphics file output :file fig/tidsserietrend.png
+#+begin_src python
   df = df_org[df_org.dato >= "2023-07-01"]
   df.loc[:,"log_klienter"] = log(df.klienter)
   y = df.log_klienter
@@ -238,32 +228,26 @@ Denne kurven ser ut som en del av en sinuskurve med en trend som går oppover. F
   ax.legend()
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserietrend.png]]
 
 Nå prøver jeg å subtrahere verdien av trenden fra observasjonene.
-#+begin_src python :results replace graphics file output :file fig/tidsserie_uten_trend.png
+#+begin_src python
   df.loc[:,"log_klienter_detrended"] = df.log_klienter - res.fittedvalues
-  
+
   fig,ax=plt.subplots()
   ax.plot(df.dato, df.log_klienter_detrended, label="Uten trend")
   ax.legend()
   fargelegg(ax, spesielle_datoer)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie_uten_trend.png]]
-
-
 ** Tilpassing av sinusbølge til data
 Nå prøver jeg å tilpasse dette til en sinusbølge. En sinusbølge er gitt ved det matematiske uttrykket
-#+begin_export latex
-A\sin(2\pi ft + \phi).
-#+end_export
-
 Her prøver jeg først en manuell tilnærming.
 
-#+begin_src python :results replace graphics file output :file fig/tidsserie_sin.png
+#+begin_src python
   t = linspace(1,len(df.dato),len(df.dato))/365
   fig,ax=plt.subplots()
   ax.plot(df.dato, df.log_klienter_detrended)
@@ -271,11 +255,11 @@ Her prøver jeg først en manuell tilnærming.
   ax.legend()
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie_sin.png]]
 
 Nå skal jeg lage en tilpasning som er maskinell basert på minste kvadrater.
-#+begin_src python :results replace graphics file output :file fig/tidsserie_fit.png
+#+begin_src python
   startverdier1=[.25,-pi/9*4, .96, 0]
   # startverdier2=[.3,-3*pi/5,13.3,1]
   b1=([.15,-pi/2,.9, -.1],[.35,-pi/5*2,1.1,.1])
@@ -288,25 +272,23 @@ Nå skal jeg lage en tilpasning som er maskinell basert på minste kvadrater.
   ax.legend()
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie_fit.png]]
 
 Her prøver jeg å trekke tilpasningen fra dataene og se hva jeg sitter igjen med.
-#+begin_src python :results replace graphics file output :file fig/tidsserie_fit_diff.png
+#+begin_src python
   fig,ax=plt.subplots()
   ax.plot(df.dato, log_verdier - sinusbølge(t, *popt11))
   fargelegg(ax, spesielle_datoer)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie_fit_diff.png]]
-
-
 ** Ukesdifferanse
 En vanlig teknikk i tidsseriemodellering er å subtrahere verdien som kommer et gitt antall stidssteg før fra den gjeldende verdien. For eksempel er det naturlig å tenke seg at i en ukessyklus vil dagens verdi være likere verdien for samme dag forrige uke enn gårsdagens verdi.
 
 Jeg starter først med å se på ukesdifferansene på log-tidsserien og sammenligner den med resultatet fra over.
-#+begin_src python :results replace graphics file output :file fig/tidsserie_diff.png
+#+begin_src python
   fig,ax=plt.subplots(nrows=2, layout='constrained')
   ax[0].plot(df.dato, log_verdier - log_verdier.shift(7))
   ax[1].plot(df.dato, log_verdier - sinusbølge(t, *popt11))
@@ -316,16 +298,15 @@ Jeg starter først med å se på ukesdifferansene på log-tidsserien og sammenli
   fargelegg(ax[1], spesielle_datoer)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/tidsserie_diff.png]]
 Spesielt rundt jul og 17. mai er det store utslag.
-
 ** Kovariater
 En annen teknikk er å legge til kovariater som man tenker kan påvirke besøkstallet. En slik kovariat kan være hverdag/helg. En annen kan være dager det er spesielle hendelser eller programmer som trekker flere besøkende. Vi har allerede sett tydelig at jul, påske, ski-VM og Maskorama er eksempler på hendelser og programmer som har en sånn effekt.
 
 Hvordan kan vi identifisere programmer eller hendelser som trekker besøkende? Dager der det sendes programmer som gir mange besøk skiller seg gjerne ut i tidsserien. Avstanden mellom lave og høye verdier for antall besøkende i løpet av én uke blir stor disse stedene. La oss ta en glidende maks-, min- og snittverdi med et vindu på én uke for å se hva det viser. Vi ser også på forskjellen mellom maks og min.
 
-#+begin_src python :results replace graphics file output :file fig/glidende.png
+#+begin_src python
   fig,axs=plt.subplots(nrows=2)
   ax=axs[0]
   ax.plot(df.dato, df.klienter.rolling(window=7).min(), label="min")
@@ -337,13 +318,54 @@ Hvordan kan vi identifisere programmer eller hendelser som trekker besøkende? D
   ax.legend()
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/glidende.png]]
 
 La oss videre se på hvilke programmer som har fått flest besøkende hver dag i perioden vi så på over. Jeg vet at Dagsrevyen ofte får mange besøkende, og jeg har derfor lagt inn tallene for dette programmet som egne kolonner.
-#+begin_src python :noweb yes
+#+begin_src python
   spørring = """
-  <<progbesøk>>
+  WITH
+    d AS (
+      SELECT partitionDate dato, seriesTitleOrTitle prog, 
+             HLL_COUNT.MERGE(visitorsSketch) `besøkende`,
+        FROM `nrk-datahub.snowplow_aggregate.playback_daily_v02`
+             JOIN `nrk-datahub.metadata_views.metadata_programs` USING(contentKey)
+        WHERE partitionDate < CURRENT_DATE
+          AND nrkService = 'nrktv'
+        GROUP BY ALL),
+
+    dd AS (
+      SELECT partitionDate dato,  
+             HLL_COUNT.MERGE(visitorsSketch) `tot besøkende`
+        FROM `nrk-datahub.snowplow_aggregate.playback_daily_v02`
+        WHERE partitionDate < CURRENT_DATE
+          AND nrkService = 'nrktv'
+        GROUP BY ALL),
+
+    s AS (
+      SELECT *, ROUND(`besøkende` / `tot besøkende`, 5) andel,
+             ROW_NUMBER() OVER(PARTITION BY dato ORDER BY `besøkende` DESC) rang
+        FROM dd
+             JOIN d USING(dato)),
+
+    udr AS (
+      SELECT *
+        FROM s
+       WHERE prog != 'Dagsrevyen'),
+
+    topp_udr AS (
+      SELECT dato,
+            STRING_AGG(prog ORDER BY andel DESC LIMIT 1) prog,
+            ARRAY_AGG(`besøkende` ORDER BY rang LIMIT 1)[OFFSET(0)] `besøkende`,
+            ARRAY_AGG(andel ORDER BY rang LIMIT 1)[OFFSET(0)] andel,
+            ARRAY_AGG(rang ORDER BY rang LIMIT 1)[OFFSET(0)] rang
+        FROM udr
+      GROUP BY ALL)
+
+    SELECT *
+      FROM topp_udr t
+           JOIN (SELECT dato, `besøkende` `besøk_dr`, andel andel_dr, rang rang_dr FROM s WHERE prog = 'Dagsrevyen') dr USING(dato)
+     ORDER BY dato
   """
 
   pb_org = pandas_gbq.read_gbq(spørring, dialect="standard", project_id="nrk-datahub")
@@ -353,29 +375,29 @@ La oss videre se på hvilke programmer som har fått flest besøkende hver dag i
 #+end_src
 
 La meg først vise fordelingen over rangeringen av Dagsrevyen.
-#+begin_src python :results replace
+#+begin_src python
   pb.rang_dr.value_counts()
 #+end_src
 
-#+RESULTS:
+
 #+begin_example
-rang_dr
-1     463
-2     151
-3     104
-4      28
-5      10
-16      1
-13      1
-6       1
-15      1
-Name: count, dtype: Int64
+  rang_dr
+  1     463
+  2     151
+  3     104
+  4      28
+  5      10
+  16      1
+  13      1
+  6       1
+  15      1
+  Name: count, dtype: Int64
 #+end_example
 
 Som jeg mistenkte er Dagsrevyen det mest besøkte programmet de fleste dagene.
 
 Nå tegner jeg opp besøkstallene for Dagsrevyen og det mest besøkte programmet hver dag.
-#+begin_src python  :results replace graphics file output :file fig/topprog.png
+#+begin_src python
   with mpl.rc_context({"axes.prop_cycle" : cycler(color=plt.get_cmap("tab20").colors)}):
     fig,axs=plt.subplots(nrows=2)
     axs[0].plot(pb.dato, pb.besøkende)
@@ -391,11 +413,10 @@ Nå tegner jeg opp besøkstallene for Dagsrevyen og det mest besøkte programmet
     axs[1].set_title("Andel besøkende")
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/topprog.png]]
 
 Dagsrevyen er en veldig stabil besøksdriver. Av den grunn vil jeg prøve å gjøre en tidsserieanalyse av disse tallene.
-
 *** Normaliserte tall (må oppdateres til gjeldende spørring)
 #+begin_src python
   df["klienter_glid_min"] = df.klienter.rolling(window=7).min()
@@ -403,7 +424,7 @@ Dagsrevyen er en veldig stabil besøksdriver. Av den grunn vil jeg prøve å gj�
   df["klienter_glid_maks"] = df.klienter.rolling(window=7).max()
 #+end_src
 
-#+begin_src python  :results replace graphics file output :file fig/normalisert.png
+#+begin_src python
   with mpl.rc_context({"axes.prop_cycle" : cycler(color=plt.get_cmap("tab20").colors)}):
     fig,axs=plt.subplots(nrows=4)
     ax=axs[0]
@@ -422,23 +443,22 @@ Dagsrevyen er en veldig stabil besøksdriver. Av den grunn vil jeg prøve å gj�
 
     fig.legend(loc="outside center left")
 #+end_src
-
 ** Tidsserieanalyse av Dagsrevyens besøkstall
 Jeg tegner opp besøkstallene for Dagsrevyen på nytt fra 1. juli 2023
 #+begin_src python
   df_dr = pb.loc[pb.dato >= "2023-07-01", ["dato","besøk_dr"]].rename(columns={"besøk_dr":"besøk"})
 #+end_src
 
-#+begin_src python :results replace graphics file output :file fig/dagsrevyen.png
+#+begin_src python
   fig,ax=plt.subplots()
   ax.plot(df_dr.dato, df_dr.besøk, color="tab:orange")
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/dagsrevyen.png]]
 
 Først tar jeg logartimen og finner trenden.
-#+begin_src python :results replace graphics file output :file fig/trend_log_dr.png
+#+begin_src python
   df_dr["log_besøk"] = log(df_dr.besøk)
   y = df_dr.log_besøk
   x = linspace(1, len(df_dr.besøk), len(df_dr.besøk))
@@ -451,21 +471,21 @@ Først tar jeg logartimen og finner trenden.
   ax.legend()
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/trend_log_dr.png]]
 
 Her er tidsserien uten trend.
-#+begin_src python :results replace graphics file output :file fig/detrend_dr.png
+#+begin_src python
   df_dr["log_avtrendet"] = df_dr.log_besøk - res.fittedvalues
   fig,ax=plt.subplots()
   ax.plot(df_dr.dato, df_dr.log_avtrendet)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/detrend_dr.png]]
 
 Nå prøver jeg igjen med en sinuskurve.
-#+begin_src python :results replace graphics file output :file fig/sin_dr.png
+#+begin_src python
   t = linspace(1,len(df_dr.dato),len(df_dr.dato))/365
   startverdier1=[.15,-pi/9*4, .96, 0]
   # startverdier2=[.3,-3*pi/5,13.3,1]
@@ -479,30 +499,29 @@ Nå prøver jeg igjen med en sinuskurve.
   ax.legend()
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/sin_dr.png]]
 
 Her er tidsserien justert for sinuskurven.
-#+begin_src python :results replace graphics file output :file fig/desesong_dr.png
+#+begin_src python
   df_dr["sinusjustert"] = df_dr.log_avtrendet - sinusbølge(t, *popt11)
   fig,ax=plt.subplots()
   ax.plot(df_dr.dato, df_dr.sinusjustert)
 #+end_src
 
-#+RESULTS:
+
 [[file:fig/desesong_dr.png]]
 
 Nå prøver jeg med ukesdiff på logbesøkstallene og viser dem sammen med resultatet fra ovenfor.
-#+begin_src python :results replace graphics file output :file fig/ukesdiff_dr.png
+#+begin_src python
   df_dr["ukesdiff"] = df_dr.log_besøk - df_dr.log_besøk.shift(7)
   fig,ax=plt.subplots()
   ax.plot(df_dr.dato, df_dr.ukesdiff)
   ax.plot(df_dr.dato, df_dr.sinusjustert)
 #+end_src
 
-#+RESULTS:
-[[file:fig/ukesdiff_dr.png]]
 
+[[file:fig/ukesdiff_dr.png]]
 ** Konklusjon
 Vi har kommet et stykke på vei når det gjelder å plukke besøkstallene til NRK TV fra hverandre, men det vi sitter igjen med viser fortsatt tendenser til en periodisitet av noe slag.
 
